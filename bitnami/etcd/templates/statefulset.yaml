@@ -85,8 +85,56 @@ spec:
       shareProcessNamespace: {{ .Values.shareProcessNamespace }}
       {{- end }}
       serviceAccountName: {{ include "etcd.serviceAccountName" $ | quote }}
-      {{- if or .Values.initContainers (and .Values.volumePermissions.enabled .Values.persistence.enabled) }}
       initContainers:
+        {{- $replicaCount := int .Values.replicaCount }}
+        {{- $peerPort := int .Values.containerPorts.peer }}
+        {{- $etcdFullname := include "common.names.fullname" . }}
+        {{- $releaseNamespace := .Release.Namespace }}
+        {{- $etcdHeadlessServiceName := (printf "%s-%s" $etcdFullname "headless" | trunc 63 | trimSuffix "-") }}
+        {{- $clusterDomain := .Values.clusterDomain }}
+        {{- $etcdPeerProtocol := include "etcd.peerProtocol" . }}
+        {{- $etcdClientProtocol := include "etcd.clientProtocol" . }}
+        - name: init
+          image: {{ include "etcd.image" . }}
+          env:
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: ETCD_INITIAL_ADVERTISE_PEER_URLS
+              value: "{{ $etcdPeerProtocol }}://$(MY_POD_NAME).{{ $etcdHeadlessServiceName }}.{{ .Release.Namespace }}.svc.{{ $clusterDomain }}:{{ .Values.containerPorts.peer }}"
+            {{- $initialCluster := list }}
+            {{- range $e, $i := until $replicaCount }}
+            {{- $initialCluster = append $initialCluster (printf "%s-%d=%s://%s-%d.%s.%s.svc.%s:%d" $etcdFullname $i $etcdPeerProtocol $etcdFullname $i $etcdHeadlessServiceName $releaseNamespace $clusterDomain $peerPort) }}
+            {{- end }}
+            - name: ETCD_INITIAL_CLUSTER
+              value: {{ join "," $initialCluster | quote }}
+            - name: ETCD_NAME
+              value: "$(MY_POD_NAME)"
+            - name: ETCD_INITIAL_CLUSTER_TOKEN
+              value: {{ .Values.initialClusterToken | quote }}
+          command:
+          - /bin/bash
+          - -c
+          - |
+            set -e
+            echo init script started
+            export
+            if [ -f "/mnt/restore/do-restore" ]; then
+              if [ -f "/mnt/restore/etcdctl.snap" ]; then
+                rm -rf /bitnami/etcd/data
+                etcdutl snapshot restore /mnt/restore/etcdctl.snap --data-dir /bitnami/etcd/data --initial-advertise-peer-urls "$ETCD_INITIAL_ADVERTISE_PEER_URLS" --initial-cluster "$ETCD_INITIAL_CLUSTER" --initial-cluster-token "$ETCD_INITIAL_CLUSTER_TOKEN" --name "$ETCD_NAME"
+                chown -R 1001:1001 /bitnami/etcd/data
+              fi
+              rm /mnt/restore/do-restore
+            fi
+            echo init script ended
+          volumeMounts:
+            - name: data
+              mountPath: /bitnami/etcd
+            - name: restore
+              mountPath: /mnt/restore
+          imagePullPolicy: {{ .Values.volumePermissions.image.pullPolicy | quote }}
         {{- if .Values.initContainers }}
         {{- include "common.tplvalues.render" (dict "value" .Values.initContainers "context" $) | nindent 8 }}
         {{- end }}
@@ -108,7 +156,6 @@ spec:
             - name: data
               mountPath: /bitnami/etcd
         {{- end }}
-      {{- end }}
       containers:
         {{- $replicaCount := int .Values.replicaCount }}
         {{- $peerPort := int .Values.containerPorts.peer }}
@@ -198,9 +245,8 @@ spec:
             - name: GOMAXPROCS
               value: {{ .Values.maxProcs }}
             {{- end }}
-            {{- if gt $replicaCount 1 }}
             - name: ETCD_INITIAL_CLUSTER_TOKEN
-              value: "etcd-cluster-k8s"
+              value: {{ .Values.initialClusterToken | quote }}
             - name: ETCD_INITIAL_CLUSTER_STATE
               value: {{ default (ternary "new" "existing" .Release.IsInstall) .Values.initialClusterState | quote }}
             {{- $initialCluster := list }}
@@ -209,7 +255,6 @@ spec:
             {{- end }}
             - name: ETCD_INITIAL_CLUSTER
               value: {{ join "," $initialCluster | quote }}
-            {{- end }}
             - name: ETCD_CLUSTER_DOMAIN
               value: {{ printf "%s.%s.svc.%s" $etcdHeadlessServiceName $releaseNamespace $clusterDomain | quote }}
             {{- if and .Values.auth.client.secureTransport .Values.auth.client.useAutoTLS }}
