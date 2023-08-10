@@ -725,6 +725,9 @@ metrics:
   ## @param metrics.enabled Expose etcd metrics
   ##
   enabled: false
+  ## @param metrics.listenMetricsUrls
+  ##
+  listenMetricsUrls: ""
   ## @param metrics.podAnnotations [object] Annotations for the Prometheus metrics on etcd pods
   ##
   podAnnotations:
